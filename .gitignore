@@ -1,0 +1,34 @@
+.env
+**/.env
+__pycache__/
+*.py[cod]
+venv/
+.env.*
+!.env.example
+
+# Local OAuth tokens
+backend/.private/
+
+# Local credentials and environment files
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+backend/.private/
+
+# Python and Node generated files
+**/__pycache__/
+*.py[cod]
+**/venv/
+**/.venv/
+frontend/node_modules/
+frontend/dist/
+.vercel/
+.DS_Store
+
+# Local backups and generated files
+*.backup
+*.before_*
+*.broken_*
