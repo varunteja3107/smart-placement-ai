@@ -6,7 +6,7 @@ import {
 } from 'lucide-react'
 import './App.css'
 
-const API = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000'
+const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
 
 const demoJobs = [
   { id: 'JOB-001', title: 'Graduate Software Engineer', company: 'TechNova Solutions', location: 'Bengaluru', package: '₹8–12 LPA', skills: ['Python', 'DSA', 'SQL'] },

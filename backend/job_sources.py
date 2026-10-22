@@ -157,3 +157,91 @@ def fetch_remotive_jobs(search=""):
 
     return results
 
+
+
+# Additional public job feeds. Keep each source's attribution and original URL.
+def fetch_jobicy_jobs(search=""):
+    """Fetch recent remote jobs from Jobicy's public API."""
+    params = {"count": 100}
+    query = search.strip()
+    if len(query) >= 3:
+        params["tag"] = query[:50]
+
+    try:
+        response = requests.get(
+            "https://jobicy.com/api/v2/remote-jobs",
+            params=params,
+            timeout=20,
+            headers={"User-Agent": "SmartPlacementAI/1.0"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        print(f"Jobicy request failed: {exc}")
+        return []
+
+    results = []
+    for job in payload.get("jobs", []):
+        results.append({
+            "id": f"JOBICY-{job.get('id', '')}",
+            "title": job.get("jobTitle") or "Untitled role",
+            "company": job.get("companyName") or "Unknown company",
+            "location": job.get("jobGeo") or "Remote",
+            "job_type": ", ".join(job.get("jobType") or []) or "Not specified",
+            "package": (
+                f'{job.get("salaryCurrency", "")} '
+                f'{job.get("salaryMin", "")}-{job.get("salaryMax", "")}'
+                if job.get("salaryMin") or job.get("salaryMax")
+                else "Not disclosed"
+            ),
+            "skills": job.get("jobIndustry") or [],
+            "description": job.get("jobExcerpt") or job.get("jobDescription") or "",
+            "source": "Jobicy",
+            "source_url": job.get("url") or "",
+            "apply_url": job.get("url") or "",
+            "application_method": "external",
+            "published_at": job.get("pubDate") or "",
+            "status": "Open",
+            "min_cgpa": None,
+            "deadline": None,
+        })
+    return results
+
+
+def fetch_arbeitnow_jobs(search=""):
+    """Fetch the public Arbeitnow feed; relevance filtering happens downstream."""
+    try:
+        response = requests.get(
+            "https://arbeitnow.com/api/job-board-api",
+            timeout=20,
+            headers={"User-Agent": "SmartPlacementAI/1.0"},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        print(f"Arbeitnow request failed: {exc}")
+        return []
+
+    items = payload if isinstance(payload, list) else payload.get("data", [])
+    results = []
+    for job in items:
+        tags = job.get("tags") or []
+        results.append({
+            "id": f'ARBEITNOW-{job.get("slug") or job.get("id") or ""}',
+            "title": job.get("title") or "Untitled role",
+            "company": job.get("company_name") or "Unknown company",
+            "location": job.get("location") or ("Remote" if job.get("remote") else "Not specified"),
+            "job_type": "Not specified",
+            "package": "Not disclosed",
+            "skills": [str(tag) for tag in tags],
+            "description": job.get("description") or "",
+            "source": "Arbeitnow",
+            "source_url": job.get("url") or "",
+            "apply_url": job.get("url") or "",
+            "application_method": "external",
+            "published_at": job.get("created_at") or "",
+            "status": "Open",
+            "min_cgpa": None,
+            "deadline": None,
+        })
+    return results

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 
 from rag_engine import search_jobs
-from job_sources import fetch_remotive_jobs
+from job_sources import fetch_remotive_jobs, fetch_jobicy_jobs, fetch_arbeitnow_jobs
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from database import Base, SessionLocal, engine
@@ -32,6 +32,7 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://smart-placement-ai.vercel.app",
     ],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
@@ -200,94 +201,226 @@ def ai_search_jobs(
     q: str = Query(..., min_length=1),
     limit: int = Query(default=10, ge=1, le=50),
 ):
-    """Search local and external jobs using semantic similarity."""
+    """Search job feeds with role-aware technical relevance scoring."""
+    import html
+    import re
+    from job_board_links import get_job_board_links
 
     query = q.strip()
-
     if not query:
-        raise HTTPException(
-            status_code=400,
-            detail="Search query is required",
-        )
+        raise HTTPException(status_code=400, detail="Search query cannot be empty.")
 
-    combined_jobs = []
+    query_lower = query.lower()
+    query_tokens = set(re.findall(r"[a-zA-Z0-9+#.]+", query_lower))
 
-    # Add local demo jobs.
-    for job in jobs:
-        if job["status"] != "Open":
-            continue
-
-        item = dict(job)
-        item["source"] = "Smart Placement AI"
-        item["source_url"] = ""
-        item["application_method"] = "platform"
-
-        combined_jobs.append(item)
-
-    # Fetch external jobs. A remote API failure must not break local search.
-    try:
-        external_jobs = fetch_remotive_jobs(query)
-    except Exception as exc:
-        print(f"External job search failed: {exc}")
-        external_jobs = []
-
-    # Avoid duplicate title/company combinations.
-    seen = {
-        (
-            item["title"].strip().casefold(),
-            item["company"].strip().casefold(),
-        )
-        for item in combined_jobs
+    # These words describe seniority or generic role intent, not technical skills.
+    generic = {
+        "a", "an", "and", "at", "for", "find", "in", "job", "jobs",
+        "me", "of", "on", "or", "search", "the", "to", "with", "work",
+        "opening", "openings", "role", "roles", "developer", "engineer",
+        "intern", "internship", "fresher", "junior", "graduate",
+        "entry", "level", "senior", "staff", "lead", "remote",
     }
 
-    for job in external_jobs:
-        title = job.get("title") or "Untitled role"
-        company = job.get("company") or "Unknown company"
+    skill_aliases = {
+        "python": ("python",),
+        "java": ("java", "spring boot", "spring framework"),
+        "javascript": ("javascript", "js", "node.js", "nodejs"),
+        "typescript": ("typescript", "node.js", "nodejs"),
+        "react": ("react", "react.js", "reactjs"),
+        "c++": ("c++", "cpp"),
+        "c": (" c ", " c/c++ ", " c developer"),
+        "sql": ("sql", "mysql", "postgresql", "sqlite"),
+        "django": ("django",),
+        "flask": ("flask",),
+        "fastapi": ("fastapi",),
+        "ai": ("artificial intelligence", " ai ", "machine learning", "llm"),
+        "machine": ("machine learning", " ml ", "ml engineer"),
+        "learning": ("machine learning", "deep learning"),
+        "ml": ("machine learning", " ml ", "deep learning"),
+        "data": ("data engineer", "data analyst", "data science"),
+        "cloud": ("cloud", "aws", "azure", "gcp"),
+        "devops": ("devops", "site reliability", "kubernetes", "terraform"),
+        "security": ("cybersecurity", "security engineer", "penetration testing"),
+    }
 
-        key = (
-            title.strip().casefold(),
-            company.strip().casefold(),
-        )
-
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        item = dict(job)
-        item["title"] = title
-        item["company"] = company
-        item["source"] = "Remotive"
-        item["application_method"] = "external"
-        item["min_cgpa"] = None
-        item["deadline"] = None
-        item["apply_url"] = item.get("source_url", "")
-
-        combined_jobs.append(item)
-
-    # Rank local and external jobs together.
-    results = search_jobs(
-        query,
-        combined_jobs,
-        limit=limit,
+    skill_tokens = query_tokens - generic
+    early_career = bool(
+        query_tokens & {"intern", "internship", "fresher", "junior", "graduate"}
+        or "entry level" in query_lower
     )
+    technical_query = bool(skill_tokens)
 
-    # Ensure every result has a consistent source and application URL.
-    for result in results:
-        result.setdefault("source", "Smart Placement AI")
-        result.setdefault("application_method", "platform")
+    candidates = []
 
-        if result.get("source") == "Remotive":
-            result["apply_url"] = result.get("source_url", "")
-            result["application_method"] = "external"
-        else:
-            result["apply_url"] = ""
+    def clean(value):
+        value = html.unescape(str(value or ""))
+        value = re.sub(r"<[^>]*>", " ", value)
+        return re.sub(r"\s+", " ", value).strip()
+
+    def add_candidate(job, source, external=False):
+        title = clean(job.get("title"))
+        company = clean(job.get("company"))
+        skills = clean(job.get("skills"))
+        description = clean(
+            job.get("description") or job.get("jobDescription")
+            or job.get("jobExcerpt") or job.get("summary")
+        )
+        location = clean(job.get("location") or job.get("jobGeo"))
+        job_type = clean(job.get("job_type") or job.get("jobType"))
+        level = clean(job.get("level"))
+
+        if not title:
+            return
+
+        title_l = title.lower()
+        skills_l = skills.lower()
+        description_l = description.lower()
+        metadata_l = " ".join([job_type, level, location]).lower()
+        all_text = " ".join(
+            [title_l, skills_l, description_l, metadata_l]
+        )
+        padded_text = f" {all_text} "
+
+        # Exclude obvious non-technical occupations when technical skills
+        # are part of the user's query.
+        nontechnical = (
+            "marketing", "social media", "people ops", "human resources",
+            "customer success", "financial consulting", "controller",
+            "sales representative", "recruiter", "copywriter",
+            "content marketing", "ad operations",
+        )
+        technical_role = any(term in title_l for term in (
+            "software", "developer", "engineer", "programmer", "technology",
+            "technical", "data", "machine learning", "artificial intelligence",
+            "devops", "cybersecurity", "security", "cloud", "qa", "quality assurance",
+            "it ", "java", "python", "frontend", "front-end", "backend", "back-end",
+            "full stack", "full-stack", "embedded",
+        ))
+        if technical_query and any(term in title_l for term in nontechnical):
+            if not technical_role:
+                return
+
+        score = 0
+        reasons = []
+        matched_terms = []
+
+        # Generic words can help identify role type, but cannot carry a result
+        # whose technical skills do not match the requested role.
+        skill_matches = 0
+        for token in sorted(skill_tokens, key=len, reverse=True):
+            aliases = skill_aliases.get(token, (token,))
+            matches = [
+                alias for alias in aliases
+                if alias in padded_text
+            ]
+            if not matches:
+                continue
+
+            skill_matches += 1
+            matched_terms.append(token)
+
+            if any(alias in f" {title_l} " for alias in matches):
+                score += 12
+                reasons.append(f"title matches {token}")
+            elif any(alias in f" {skills_l} " for alias in matches):
+                score += 10
+                reasons.append(f"skills match {token}")
+            else:
+                score += 4
+                reasons.append(f"description mentions {token}")
+
+        role_words = query_tokens & {
+            "developer", "engineer", "software", "programmer",
+            "frontend", "backend", "fullstack", "data", "security",
+        }
+        role_match = any(word in title_l for word in role_words)
+        if role_match:
+            score += 5
+            reasons.append("job title matches role")
+
+        if early_career:
+            if any(word in title_l for word in (
+                "intern", "internship", "graduate", "junior", "trainee",
+                "entry level", "entry-level", "associate",
+            )):
+                score += 8
+                reasons.append("early-career role")
+            if any(word in title_l for word in ("senior", "staff", "principal", "director", "head of")):
+                score -= 15
+                reasons.append("senior-level title is a weaker fit")
+
+        # Technical queries must match at least one requested skill in the
+        # title/skills, or two separate requested skills in the description.
+        title_or_skills_match = any(
+            alias in f" {title_l} " or alias in f" {skills_l} "
+            for token in skill_tokens
+            for alias in skill_aliases.get(token, (token,))
+        )
+        if technical_query and not title_or_skills_match:
+            return
+
+        if score <= 0:
+            return
+
+        score = max(0, min(100, round(score / max(1, len(skill_tokens) * 12 + 13) * 100, 1)))
+        item = dict(job)
+        item.update({
+            "title": title,
+            "company": company or "Company not listed",
+            "skills": skills,
+            "description": description,
+            "location": location,
+            "job_type": job_type,
+            "source": source,
+            "match_score": score,
+            "match_reason": "; ".join(dict.fromkeys(reasons[:4])) or "Related role",
+            "matched_terms": matched_terms,
+            "application_method": "External application" if external else "Platform demo listing",
+            "apply_url": (
+                job.get("apply_url") or job.get("url") or job.get("jobUrl")
+                if external else job.get("apply_url")
+            ),
+        })
+        candidates.append(item)
+
+    for job in jobs:
+        if str(job.get("status", "Open")).lower() == "open":
+            add_candidate(job, "Smart Placement AI")
+
+    sources = [
+        ("Remotive", fetch_remotive_jobs),
+        ("Jobicy", fetch_jobicy_jobs),
+        ("Arbeitnow", fetch_arbeitnow_jobs),
+    ]
+    for source, fetcher in sources:
+        try:
+            for job in fetcher(""):
+                add_candidate(job, source, external=True)
+        except Exception as exc:
+            print(f"Job source {source} failed: {exc}")
+
+    unique = {}
+    for item in candidates:
+        key = (
+            item.get("title", "").casefold(),
+            item.get("company", "").casefold(),
+        )
+        if key not in unique or item["match_score"] > unique[key]["match_score"]:
+            unique[key] = item
+
+    results = sorted(
+        unique.values(),
+        key=lambda item: item["match_score"],
+        reverse=True,
+    )[:limit]
 
     return {
         "query": query,
         "count": len(results),
-        "sources": ["Smart Placement AI", "Remotive"],
+        "sources": sorted({item["source"] for item in results}),
         "results": results,
+        "job_board_links": get_job_board_links(query),
     }
 
 
@@ -421,3 +554,32 @@ app.include_router(google_drive_router)
 # User-provided data import for local RAG development
 from local_data_connector import router as local_data_router
 app.include_router(local_data_router)
+
+
+# Hosted-AI career coach endpoint
+from hosted_ai import generate_career_answer
+
+
+@app.get("/api/rag/answer")
+def api_rag_answer(
+    query: str = Query(..., min_length=2, max_length=500),
+):
+    try:
+        retrieval = search_multisource_rag(query, jobs, limit=6)
+        answer = generate_career_answer(
+            query,
+            retrieval.get("results", []),
+        )
+
+        return {
+            "query": query,
+            "answer": answer,
+            "sources_used": retrieval.get("sources_used", []),
+            "results": retrieval.get("results", []),
+            "warnings": retrieval.get("warnings", []),
+        }
+    except Exception:
+        raise HTTPException(
+            status_code=503,
+            detail="The AI Career Coach is temporarily unavailable. Check the backend configuration and API access.",
+        )
