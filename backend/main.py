@@ -1,7 +1,4 @@
-
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://smart-placement-ai.vercel.app",from datetime import datetime, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query
