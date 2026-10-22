@@ -10,3 +10,8 @@ python-multipart
 email-validator
 
 openai
+sentence-transformers
+faiss-cpu
+scikit-learn
+torch
+transformers
