@@ -2,10 +2,11 @@ fastapi[standard]
 SQLAlchemy
 PyMySQL
 numpy
-sentence-transformers
 requests
 python-dotenv
 google-auth-oauthlib
 google-api-python-client
 python-multipart
 email-validator
+
+openai
